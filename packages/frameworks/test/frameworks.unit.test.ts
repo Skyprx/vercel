@@ -1,11 +1,11 @@
 import Ajv from 'ajv';
-import path from 'path';
+import assert from 'assert';
+import { join } from 'path';
 import { existsSync } from 'fs';
-import { Framework } from '../';
-
-function isString(arg: any): arg is string {
-  return typeof arg === 'string';
-}
+import { isString } from 'util';
+import fetch from 'node-fetch';
+import { URL, URLSearchParams } from 'url';
+import frameworkList from '../src/frameworks';
 
 const SchemaFrameworkDetectionItem = {
   type: 'array',
@@ -55,16 +55,40 @@ const Schema = {
   type: 'array',
   items: {
     type: 'object',
-    required: ['name', 'slug', 'logo', 'description', 'settings'],
-    additionalProperties: false,
+    required: [
+      'name',
+      'slug',
+      'logo',
+      'description',
+      'settings',
+      'buildCommand',
+      'devCommand',
+    ],
     properties: {
       name: { type: 'string' },
       slug: { type: ['string', 'null'] },
+      sort: { type: 'number' },
       logo: { type: 'string' },
       demo: { type: 'string' },
       tagline: { type: 'string' },
       website: { type: 'string' },
       description: { type: 'string' },
+      envPrefix: { type: 'string' },
+      useRuntime: {
+        type: 'object',
+        required: ['src', 'use'],
+        additionalProperties: false,
+        properties: {
+          src: { type: 'string' },
+          use: { type: 'string' },
+        },
+      },
+      ignoreRuntimes: {
+        type: 'array',
+        items: {
+          type: 'string',
+        },
+      },
       detectors: {
         type: 'object',
         additionalProperties: false,
@@ -75,26 +99,65 @@ const Schema = {
       },
       settings: {
         type: 'object',
-        required: ['buildCommand', 'devCommand', 'outputDirectory'],
+        required: [
+          'installCommand',
+          'buildCommand',
+          'devCommand',
+          'outputDirectory',
+        ],
         additionalProperties: false,
         properties: {
+          installCommand: SchemaSettings,
           buildCommand: SchemaSettings,
           devCommand: SchemaSettings,
           outputDirectory: SchemaSettings,
         },
       },
+      recommendedIntegrations: {
+        type: 'array',
+        items: {
+          type: 'object',
+          required: ['id', 'dependencies'],
+          additionalProperties: false,
+          properties: {
+            id: {
+              type: 'string',
+            },
+            dependencies: {
+              type: 'array',
+              items: {
+                type: 'string',
+              },
+            },
+          },
+        },
+      },
+
+      dependency: { type: 'string' },
+      cachePattern: { type: 'string' },
+      buildCommand: { type: ['string', 'null'] },
+      devCommand: { type: ['string', 'null'] },
+      defaultVersion: { type: 'string' },
     },
   },
 };
 
+async function getDeployment(host: string) {
+  const query = new URLSearchParams();
+  query.set('url', host);
+  const res = await fetch(
+    `https://api.vercel.com/v11/deployments/get?${query}`
+  );
+  const body = await res.json();
+  return body;
+}
+
 describe('frameworks', () => {
   it('ensure there is an example for every framework', async () => {
-    const root = path.join(__dirname, '..', '..', '..');
-    const getExample = (name: string) => path.join(root, 'examples', name);
+    const root = join(__dirname, '..', '..', '..');
+    const getExample = (name: string) => join(root, 'examples', name);
 
-    const frameworks = require('../frameworks.json') as Framework[];
-
-    const result = frameworks
+    const result = frameworkList
       .map(f => f.slug)
       .filter(isString)
       .filter(f => existsSync(getExample(f)) === false);
@@ -103,10 +166,8 @@ describe('frameworks', () => {
   });
 
   it('ensure schema', async () => {
-    const frameworks = require('../frameworks.json') as Framework[];
-
     const ajv = new Ajv();
-    const result = ajv.validate(Schema, frameworks);
+    const result = ajv.validate(Schema, frameworkList);
 
     if (ajv.errors) {
       console.error(ajv.errors);
@@ -116,17 +177,52 @@ describe('frameworks', () => {
   });
 
   it('ensure logo', async () => {
-    const frameworks = require('../frameworks.json') as Framework[];
-
-    const missing = frameworks
+    const missing = frameworkList
       .map(f => f.logo)
       .filter(url => {
         const prefix =
           'https://raw.githubusercontent.com/vercel/vercel/master/packages/frameworks/logos/';
         const name = url.replace(prefix, '');
-        return existsSync(path.join(__dirname, '..', 'logos', name)) === false;
+        return existsSync(join(__dirname, '..', 'logos', name)) === false;
       });
 
     expect(missing).toEqual([]);
+  });
+
+  it('ensure unique sort number', async () => {
+    const sortNumToSlug = new Map<number, string | null>();
+    frameworkList.forEach(f => {
+      if (f.sort) {
+        const duplicateSlug = sortNumToSlug.get(f.sort);
+        expect(duplicateSlug).toStrictEqual(undefined);
+        sortNumToSlug.set(f.sort, f.slug);
+      }
+    });
+  });
+
+  it('ensure unique slug', async () => {
+    const slugs = new Set<string>();
+    for (const { slug } of frameworkList) {
+      if (typeof slug === 'string') {
+        assert(!slugs.has(slug), `Slug "${slug}" is not unique`);
+        slugs.add(slug);
+      }
+    }
+  });
+
+  it('ensure all demo URLs are "public"', async () => {
+    await Promise.all(
+      frameworkList
+        .filter(f => typeof f.demo === 'string')
+        .map(async f => {
+          const url = new URL(f.demo!);
+          const deployment = await getDeployment(url.hostname);
+          assert.equal(
+            deployment.public,
+            true,
+            `Demo URL ${f.demo} is not "public"`
+          );
+        })
+    );
   });
 });
